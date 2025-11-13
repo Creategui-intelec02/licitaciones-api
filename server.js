@@ -1,6 +1,5 @@
 // ====================================
-// 🚀 SERVIDOR LICITACIONES - OPCIÓN 2
-// Copiar este código directamente en server.js
+// 🚀 SERVIDOR LICITACIONES - COMPLETO
 // ====================================
 
 require('dotenv').config();
@@ -13,6 +12,7 @@ const path = require('path');
 const cors = require('cors');
 
 // ============== CONFIGURACIÓN ==============
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
@@ -32,6 +32,7 @@ if (!fs.existsSync(TEMP_DIR)) {
 }
 
 // ============== MULTER STORAGE ==============
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, TEMP_DIR);
@@ -58,6 +59,7 @@ const upload = multer({
 });
 
 // ============== MIDDLEWARE ==============
+
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -106,8 +108,49 @@ app.get('/stats', (req, res) => {
   }
 });
 
-// UPLOAD - Ruta principal
-// ============== RUTA BATCH - VERSIÓN CORREGIDA ==============
+// ============== RUTA SINGLE UPLOAD ==============
+
+app.post('/api/upload', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: 'No file found'
+      });
+    }
+
+    const filePath = req.file.path;
+    const fileName = req.file.originalname;
+    const fileSize = (req.file.size / 1024 / 1024).toFixed(2);
+
+    console.log(`\n📄 ARCHIVO RECIBIDO`);
+    console.log(`  Nombre: ${fileName}`);
+    console.log(`  Tamaño: ${fileSize} MB`);
+
+    // Limpiar archivo
+    fs.unlink(filePath, () => {});
+
+    res.json({
+      success: true,
+      message: 'Archivo recibido',
+      file: {
+        name: fileName,
+        size: fileSize,
+        mimeType: req.file.mimetype
+      }
+    });
+
+  } catch (error) {
+    console.error(`❌ Error en /api/upload: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// ============== RUTA BATCH UPLOAD ==============
+
 app.post('/api/upload-batch', upload.array('files', 10), async (req, res) => {
   const startTime = Date.now();
   const filePaths = [];
@@ -120,41 +163,100 @@ app.post('/api/upload-batch', upload.array('files', 10), async (req, res) => {
       });
     }
 
+    // Obtener parámetros
     const batchId = req.body.batch_id || `batch_${Date.now()}`;
     const processType = req.body.process_type || 'GG';
     const clientId = req.body.client_id || 'INTELEC_SL';
     const totalFiles = req.files.length;
+    const totalSizeMB = (req.files.reduce((s, f) => s + f.size, 0) / 1024 / 1024).toFixed(2);
 
-    console.log(`\n📦 BATCH RECIBIDO - ${totalFiles} archivos`);
-    req.files.forEach((file, i) => {
-      console.log(`  ${i + 1}. ${file.originalname}`);
+    // Guardar rutas para limpieza posterior
+    req.files.forEach(file => {
       filePaths.push(file.path);
     });
 
-    // Preparar FormData para n8n
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`📦 BATCH RECIBIDO - ${totalFiles} archivos`);
+    console.log(`${'='.repeat(80)}`);
+    console.log(`  Batch ID: ${batchId}`);
+    console.log(`  Tamaño total: ${totalSizeMB} MB`);
+    console.log(`  Archivos:`);
+
+    req.files.forEach((file, idx) => {
+      console.log(`    ${idx + 1}. ${file.originalname} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+    });
+
+    // ============== FILTRADO POR TAMAÑO ==============
+
+    const MAX_WEBHOOK_SIZE = 16 * 1024 * 1024; // 16 MB
+    let largeFiles = [];
+    let smallFiles = [];
+
+    req.files.forEach((file, idx) => {
+      if (file.size > MAX_WEBHOOK_SIZE) {
+        largeFiles.push({
+          index: idx + 1,
+          name: file.originalname,
+          size: (file.size / 1024 / 1024).toFixed(2),
+          reason: `Archivo pesado (${(file.size / 1024 / 1024).toFixed(2)} MB > 16 MB)`
+        });
+        console.log(`  ⚠️  Archivo ${idx + 1} RECHAZADO: ${file.originalname} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+      } else {
+        smallFiles.push(file);
+        console.log(`  ✅ Archivo ${idx + 1} ACEPTADO: ${file.originalname} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+      }
+    });
+
+    console.log(`\n📊 ANÁLISIS DE FILTRADO:`);
+    console.log(`  ✅ Para procesar: ${smallFiles.length}`);
+    console.log(`  ⚠️  Para subir manual: ${largeFiles.length}`);
+
+    // Si no hay archivos pequeños, responder directamente
+    if (smallFiles.length === 0) {
+      filePaths.forEach(filePath => {
+        if (fs.existsSync(filePath)) {
+          fs.unlink(filePath, () => {});
+        }
+      });
+
+      console.log(`\n❌ SIN ARCHIVOS VÁLIDOS - Todos > 16 MB`);
+
+      return res.json({
+        success: false,
+        message: `Todos los archivos son mayores a 16 MB. Súbelos manualmente a N8N.`,
+        processedFiles: 0,
+        skippedFiles: largeFiles,
+        totalReceived: totalFiles,
+        totalSize: totalSizeMB
+      });
+    }
+
+    // ============== ENVIAR ARCHIVOS VÁLIDOS A N8N ==============
+
     const formData = new FormData();
 
-    for (let i = 0; i < req.files.length; i++) {
-      const file = req.files[i];
+    for (let i = 0; i < smallFiles.length; i++) {
+      const file = smallFiles[i];
       const fileStream = fs.createReadStream(file.path);
-      
-      formData.append(`files`, fileStream, {
+
+      formData.append('files', fileStream, {
         filename: file.originalname,
         contentType: 'application/pdf'
       });
     }
 
-    // Metadata
+    // Agregar metadatos
     formData.append('batch_id', batchId);
     formData.append('process_type', processType);
     formData.append('client_id', clientId);
-    formData.append('total_files', totalFiles);
+    formData.append('total_files', smallFiles.length);
     formData.append('uploaded_by', 'backend-api-batch');
     formData.append('upload_timestamp', new Date().toISOString());
 
-    console.log(`🚀 Enviando batch a N8N...`);
+    console.log(`\n🚀 ENVIANDO A N8N...`);
+    console.log(`  URL: ${N8N_WEBHOOK_URL.substring(0, 50)}...`);
+    console.log(`  Archivos: ${smallFiles.length}`);
 
-    // Enviar a n8n
     const response = await axios.post(N8N_WEBHOOK_URL, formData, {
       headers: formData.getHeaders(),
       timeout: 600000,
@@ -165,33 +267,51 @@ app.post('/api/upload-batch', upload.array('files', 10), async (req, res) => {
 
     const processingTime = ((Date.now() - startTime) / 1000).toFixed(2);
 
-    console.log(`✅ Respuesta: ${response.status} (${processingTime}s)`);
+    console.log(`\n📬 RESPUESTA DE N8N:`);
+    console.log(`  Status: ${response.status}`);
+    console.log(`  Tiempo: ${processingTime}s`);
 
     // Limpiar archivos
     filePaths.forEach(filePath => {
-      fs.unlink(filePath, () => {});
+      if (fs.existsSync(filePath)) {
+        fs.unlink(filePath, () => {});
+      }
     });
 
+    // Respuesta exitosa
     if (response.status >= 200 && response.status < 300) {
+      console.log(`\n✅ PROCESO COMPLETADO`);
+
       return res.json({
         success: true,
-        message: `✅ ${totalFiles} archivo(s) enviado(s) a N8N en batch`,
+        message: `✅ ${smallFiles.length} archivo(s) enviado(s) a N8N`,
+        processedFiles: smallFiles.length,
+        skippedFiles: largeFiles,
+        totalReceived: totalFiles,
+        totalSize: totalSizeMB,
         batchId: batchId,
-        totalFiles: totalFiles,
         processingTime: `${processingTime}s`,
         n8nResponse: response.data
       });
     } else {
+      console.log(`\n❌ ERROR DE N8N - Status ${response.status}`);
+
       return res.status(response.status).json({
         success: false,
-        error: 'Error en N8N',
-        details: response.data
+        message: `Error enviando a N8N (Status ${response.status})`,
+        processedFiles: smallFiles.length,
+        skippedFiles: largeFiles,
+        totalReceived: totalFiles,
+        totalSize: totalSizeMB,
+        error: response.data || response.statusText
       });
     }
 
   } catch (error) {
-    console.error(`❌ Error: ${error.message}`);
-    
+    console.error(`\n❌ ERROR: ${error.message}`);
+    console.error(error.stack);
+
+    // Limpiar archivos en caso de error
     filePaths.forEach(filePath => {
       if (fs.existsSync(filePath)) {
         fs.unlink(filePath, () => {});
@@ -206,18 +326,24 @@ app.post('/api/upload-batch', upload.array('files', 10), async (req, res) => {
 });
 
 // ============== LIMPIEZA AUTOMÁTICA ==============
+
 setInterval(() => {
   const now = Date.now();
-  const maxAge = 30 * 60 * 1000;
+  const maxAge = 30 * 60 * 1000; // 30 minutos
 
   fs.readdir(TEMP_DIR, (err, files) => {
     if (err) return;
+
     files.forEach(file => {
       const filePath = path.join(TEMP_DIR, file);
+
       fs.stat(filePath, (err, stats) => {
         if (err) return;
+
         if (now - stats.mtimeMs > maxAge) {
-          fs.unlink(filePath, () => console.log(`🗑️ Limpiado: ${file}`));
+          fs.unlink(filePath, () => {
+            console.log(`🗑️ Limpiado: ${file}`);
+          });
         }
       });
     });
@@ -225,6 +351,7 @@ setInterval(() => {
 }, 30 * 60 * 1000);
 
 // ============== ERROR HANDLING ==============
+
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     if (err.code === 'FILE_TOO_LARGE') {
@@ -234,18 +361,50 @@ app.use((err, req, res, next) => {
         maxSize: `${process.env.MAX_FILE_SIZE_MB || 80}MB`
       });
     }
+    if (err.code === 'LIMIT_FILE_COUNT') {
+      return res.status(413).json({
+        success: false,
+        error: 'Too many files'
+      });
+    }
   }
-  res.status(500).json({ success: false, error: err.message });
+
+  if (err.message === 'Solo PDFs permitidos') {
+    return res.status(400).json({
+      success: false,
+      error: err.message
+    });
+  }
+
+  console.error('❌ Server Error:', err);
+  res.status(500).json({
+    success: false,
+    error: err.message || 'Internal server error'
+  });
 });
 
-// ============== INICIAR ==============
+// ============== 404 HANDLER ==============
+
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: 'Route not found',
+    path: req.path
+  });
+});
+
+// ============== INICIAR SERVIDOR ==============
+
 app.listen(PORT, () => {
-  console.log('\n╔═══════════════════════════════╗');
-  console.log('║ 🚀 LICITACIONES API - OPCIÓN 2 ║');
-  console.log('╚═══════════════════════════════╝\n');
+  console.log('\n╔════════════════════════════════════╗');
+  console.log('║  🚀 LICITACIONES API - VERSIÓN 3   ║');
+  console.log('║  Filtrado de archivos por tamaño   ║');
+  console.log('╚════════════════════════════════════╝\n');
+
   console.log(`📡 Puerto: ${PORT}`);
   console.log(`🔗 Health: http://localhost:${PORT}/health`);
-  console.log(`📤 Upload: http://localhost:${PORT}/api/upload`);
+  console.log(`📤 Upload: POST http://localhost:${PORT}/api/upload`);
+  console.log(`📦 Batch: POST http://localhost:${PORT}/api/upload-batch`);
   console.log(`📊 Stats: http://localhost:${PORT}/stats`);
-  console.log(`\n✅ Servidor listo\n`);
+  console.log(`\n✅ Servidor listo para recibir archivos\n`);
 });
