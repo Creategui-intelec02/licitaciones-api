@@ -138,7 +138,7 @@ app.post('/api/upload-batch', upload.array('files', 10), async (req, res) => {
       const file = req.files[i];
       const fileStream = fs.createReadStream(file.path);
       
-      formData.append(`file_${i + 1}`, fileStream, {
+      formData.append(`files`, fileStream, {
         filename: file.originalname,
         contentType: 'application/pdf'
       });
