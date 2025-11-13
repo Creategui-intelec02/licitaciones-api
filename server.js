@@ -107,44 +107,57 @@ app.get('/stats', (req, res) => {
 });
 
 // UPLOAD - Ruta principal
-app.post('/api/upload-batch', upload.array('file'), async (req, res) => {
-  let filePath = null;
+// ============== RUTA BATCH - VERSIÓN CORREGIDA ==============
+app.post('/api/upload-batch', upload.array('files', 10), async (req, res) => {
   const startTime = Date.now();
+  const filePaths = [];
 
   try {
-    if (!req.file) {
+    if (!req.files || req.files.length === 0) {
       return res.status(400).json({
         success: false,
-        error: 'No file found'
+        error: 'No files found'
       });
     }
 
-    filePath = req.file.path;
-    const fileSize = req.file.size;
-    const fileName = req.file.originalname;
-    const fileSizeMB = (fileSize / 1024 / 1024).toFixed(2);
+    const batchId = req.body.batch_id || `batch_${Date.now()}`;
+    const processType = req.body.process_type || 'GG';
+    const clientId = req.body.client_id || 'INTELEC_SL';
+    const totalFiles = req.files.length;
 
-    console.log(`\n📄 ARCHIVO RECIBIDO: ${fileName} (${fileSizeMB}MB)`);
+    console.log(`\n📦 BATCH RECIBIDO - ${totalFiles} archivos`);
+    req.files.forEach((file, i) => {
+      console.log(`  ${i + 1}. ${file.originalname}`);
+      filePaths.push(file.path);
+    });
 
     // Preparar FormData para n8n
-    const fileStream = fs.createReadStream(filePath);
     const formData = new FormData();
-    
-    formData.append('file', fileStream, {
-      filename: fileName,
-      contentType: 'application/pdf'
-    });
-    formData.append('process_type', req.body.process_type || 'GG');
-    formData.append('client_id', req.body.client_id || 'INTELEC_SL');
-    formData.append('uploaded_by', 'backend-api');
-    formData.append('file_size_mb', fileSizeMB);
 
-    console.log(`🚀 Enviando a n8n...`);
+    for (let i = 0; i < req.files.length; i++) {
+      const file = req.files[i];
+      const fileStream = fs.createReadStream(file.path);
+      
+      formData.append(`file_${i + 1}`, fileStream, {
+        filename: file.originalname,
+        contentType: 'application/pdf'
+      });
+    }
+
+    // Metadata
+    formData.append('batch_id', batchId);
+    formData.append('process_type', processType);
+    formData.append('client_id', clientId);
+    formData.append('total_files', totalFiles);
+    formData.append('uploaded_by', 'backend-api-batch');
+    formData.append('upload_timestamp', new Date().toISOString());
+
+    console.log(`🚀 Enviando batch a N8N...`);
 
     // Enviar a n8n
     const response = await axios.post(N8N_WEBHOOK_URL, formData, {
       headers: formData.getHeaders(),
-      timeout: 120000,
+      timeout: 180000,
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
       validateStatus: () => true
@@ -152,40 +165,42 @@ app.post('/api/upload-batch', upload.array('file'), async (req, res) => {
 
     const processingTime = ((Date.now() - startTime) / 1000).toFixed(2);
 
-    console.log(`✅ Respuesta de n8n: ${response.status} (${processingTime}s)`);
+    console.log(`✅ Respuesta: ${response.status} (${processingTime}s)`);
 
-    // Limpiar archivo
-    fs.unlink(filePath, () => {});
+    // Limpiar archivos
+    filePaths.forEach(filePath => {
+      fs.unlink(filePath, () => {});
+    });
 
     if (response.status >= 200 && response.status < 300) {
       return res.json({
         success: true,
-        message: 'Archivo procesándose',
-        fileName: fileName,
-        fileSize: fileSize,
-        fileSizeMB: fileSizeMB,
+        message: `✅ ${totalFiles} archivo(s) enviado(s) a N8N en batch`,
+        batchId: batchId,
+        totalFiles: totalFiles,
         processingTime: `${processingTime}s`,
-        jobId: response.data?.jobId || `job_${Date.now()}`
+        n8nResponse: response.data
       });
     } else {
       return res.status(response.status).json({
         success: false,
-        error: 'N8N error',
-        status: response.status
+        error: 'Error en N8N',
+        details: response.data
       });
     }
 
   } catch (error) {
     console.error(`❌ Error: ${error.message}`);
-
-    if (filePath && fs.existsSync(filePath)) {
-      fs.unlink(filePath, () => {});
-    }
+    
+    filePaths.forEach(filePath => {
+      if (fs.existsSync(filePath)) {
+        fs.unlink(filePath, () => {});
+      }
+    });
 
     res.status(500).json({
       success: false,
-      error: error.message,
-      hint: 'Check n8n is available and URL is correct'
+      error: error.message
     });
   }
 });
