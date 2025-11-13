@@ -157,7 +157,7 @@ app.post('/api/upload-batch', upload.array('files', 10), async (req, res) => {
     // Enviar a n8n
     const response = await axios.post(N8N_WEBHOOK_URL, formData, {
       headers: formData.getHeaders(),
-      timeout: 180000,
+      timeout: 600000,
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
       validateStatus: () => true
