@@ -107,7 +107,7 @@ app.get('/stats', (req, res) => {
 });
 
 // UPLOAD - Ruta principal
-app.post('/api/upload', upload.single('file'), async (req, res) => {
+app.post('/api/upload-batch', upload.array('file'), async (req, res) => {
   let filePath = null;
   const startTime = Date.now();
 
